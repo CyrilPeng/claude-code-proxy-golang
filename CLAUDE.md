@@ -92,16 +92,14 @@ go build -o claude-code-proxy cmd/claude-code-proxy/main.go && ./claude-code-pro
 converter.go 中的 `mapModel()` 函数实现智能路由：
 
 ```go
-// Opus 层级 → 旗舰模型（默认：gemini-3-pro-preview）
+// Opus 层级（默认：gemini-3-pro-preview）
 "*opus*" → google/gemini-3-pro-preview (或 ANTHROPIC_DEFAULT_OPUS_MODEL)
 
-// Sonnet 层级 → 版本感知（默认：sonnet-4→gemini-3-flash-preview，sonnet-3→gemini-2.5-pro）
-"*sonnet-4*" 或 "*sonnet-5*" → google/gemini-3-flash-preview
-"*sonnet-3*" → google/gemini-2.5-pro
-(或 ANTHROPIC_DEFAULT_SONNET_MODEL)
+// Sonnet 层级（默认：gemini-3-flash-preview）
+"*sonnet*" → google/gemini-3-flash-preview (或 ANTHROPIC_DEFAULT_SONNET_MODEL)
 
-// Haiku 层级 → 轻量级模型（默认：gemini-2.5-flash）
-"*haiku*" → google/gemini-2.5-flash (或 ANTHROPIC_DEFAULT_HAIKU_MODEL)
+// Haiku 层级（默认：gemini-2.5-pro）
+"*haiku*" → google/gemini-2.5-pro (或 ANTHROPIC_DEFAULT_HAIKU_MODEL)
 ```
 
 通过环境变量覆盖以路由到替代模型（Grok、Gemini、DeepSeek-R1 等）。
@@ -255,7 +253,7 @@ ANTHROPIC_BASE_URL=http://localhost:8082 claude --model opus -p "hi"
 # 测试 Sonnet 层级（路由到 ANTHROPIC_DEFAULT_SONNET_MODEL 或 google/gemini-3-flash-preview）
 ANTHROPIC_BASE_URL=http://localhost:8082 claude --model sonnet -p "hi"
 
-# 测试 Haiku 层级（路由到 ANTHROPIC_DEFAULT_HAIKU_MODEL 或 google/gemini-2.5-flash）
+# 测试 Haiku 层级（路由到 ANTHROPIC_DEFAULT_HAIKU_MODEL 或 google/gemini-2.5-pro）
 ANTHROPIC_BASE_URL=http://localhost:8082 claude --model haiku -p "hi"
 ```
 

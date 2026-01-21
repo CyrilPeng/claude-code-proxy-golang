@@ -74,9 +74,9 @@ OPENAI_API_KEY=sk-or-v1-your-openrouter-key
 
 # === 模型路由 ===
 # 当 Claude Code 请求 opus/sonnet/haiku 时，使用这些模型
-ANTHROPIC_DEFAULT_OPUS_MODEL=google/gemini-2.5-pro
-ANTHROPIC_DEFAULT_SONNET_MODEL=google/gemini-2.5-flash
-ANTHROPIC_DEFAULT_HAIKU_MODEL=google/gemini-2.5-flash
+ANTHROPIC_DEFAULT_OPUS_MODEL=google/gemini-3-pro-preview
+ANTHROPIC_DEFAULT_SONNET_MODEL=google/gemini-3-flash-preview
+ANTHROPIC_DEFAULT_HAIKU_MODEL=google/gemini-2.5-pro
 EOF
 ```
 
@@ -226,9 +226,9 @@ ccp code /path/to/project
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `OPENAI_BASE_URL` | - | API 基础 URL |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `google/gemini-2.5-pro` | opus 层级映射模型 |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `google/gemini-3-pro-preview` | opus 层级映射模型 |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `google/gemini-3-flash-preview` | sonnet 层级映射模型 |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `google/gemini-3-pro-preview` | haiku 层级映射模型 |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `google/gemini-2.5-pro` | haiku 层级映射模型 |
 | `HOST` | `0.0.0.0` | 代理监听地址 |
 | `PORT` | `8082` | 代理监听端口 |
 | `ANTHROPIC_API_KEY` | - | 客户端验证密钥（可选） |

@@ -22,7 +22,7 @@ import (
 const (
 	DefaultOpusModel   = "google/gemini-3-pro-preview"
 	DefaultSonnetModel = "google/gemini-3-flash-preview"
-	DefaultHaikuModel  = "google/gemini-2.5-flash"
+	DefaultHaikuModel  = "google/gemini-2.5-pro"
 )
 
 // extractSystemText 从 Claude 的灵活系统参数中提取系统文本。
@@ -165,8 +165,8 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 }
 
 // mapModel maps Claude model names to provider-specific models using pattern matching.
-// It routes haiku/sonnet/opus tiers to appropriate models (gpt-5-mini, gpt-5, etc.)
-// and allows environment variable overrides for routing to alternative providers like
+// It routes haiku/sonnet/opus tiers to appropriate Gemini models and allows
+// environment variable overrides for routing to alternative providers like
 // Grok, Gemini, or DeepSeek. Non-Claude model names are passed through unchanged.
 func mapModel(claudeModel string, cfg *config.Config) string {
 	modelLower := strings.ToLower(claudeModel)

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"claude-code-proxy/internal/config"
-	"claude-code-proxy/pkg/models"
+	"github.com/CyrilPeng/claude-code-proxy-golang/internal/config"
+	"github.com/CyrilPeng/claude-code-proxy-golang/pkg/models"
 )
 
 // 默认模型映射（当环境变量未设置时使用）
@@ -129,21 +129,21 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 			openaiReq.ReasoningEffort = "medium" // minimal | low | medium | high
 
 		case config.ProviderOllama:
-			// Ollama needs explicit tool_choice when tools are present
-			// Without this, Ollama models may not naturally choose to use tools
+			// Ollama 需要在有工具时显式设置 tool_choice
+			// 否则 Ollama 模型可能不会自然选择使用工具
 			if len(claudeReq.Tools) > 0 {
 				openaiReq.ToolChoice = "required"
 			}
 		}
 	}
 
-	// Set token limit using adaptive per-model detection
+	// 使用自适应的单模型检测设置令牌限制
 	if claudeReq.MaxTokens > 0 {
-		// Use capability-based detection - NO hardcoded model patterns!
-		// ShouldUseMaxCompletionTokens checks cached per-model capabilities:
-		// - Cache hit: Use learned value (max_completion_tokens or max_tokens)
-		// - Cache miss: Try max_completion_tokens first (will auto-detect via retry)
-		// This works with ANY model/provider without code changes
+		// 使用基于能力的检测 - 无硬编码模型模式！
+		// ShouldUseMaxCompletionTokens 检查缓存的单模型能力：
+		// - 缓存命中：使用已学习的值（max_completion_tokens 或 max_tokens）
+		// - 缓存未命中：首先尝试 max_completion_tokens（将通过重试自动检测）
+		// 这适用于任何模型/提供商，无需代码更改
 		if cfg.ShouldUseMaxCompletionTokens(openaiModel) {
 			openaiReq.MaxCompletionTokens = claudeReq.MaxTokens
 		} else {
@@ -151,12 +151,12 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 		}
 	}
 
-	// Convert stop sequences
+	// 转换停止序列
 	if len(claudeReq.StopSequences) > 0 {
 		openaiReq.Stop = claudeReq.StopSequences
 	}
 
-	// Convert tools (if present)
+	// 转换工具（如果存在）
 	if len(claudeReq.Tools) > 0 {
 		openaiReq.Tools = convertTools(claudeReq.Tools)
 	}
@@ -164,14 +164,14 @@ func ConvertRequest(claudeReq models.ClaudeRequest, cfg *config.Config) (*models
 	return openaiReq, nil
 }
 
-// mapModel maps Claude model names to provider-specific models using pattern matching.
-// It routes haiku/sonnet/opus tiers to appropriate Gemini models and allows
-// environment variable overrides for routing to alternative providers like
-// Grok, Gemini, or DeepSeek. Non-Claude model names are passed through unchanged.
+// mapModel 使用模式匹配将 Claude 模型名称映射到特定提供商的模型。
+// 将 haiku/sonnet/opus 层级路由到适当的 Gemini 模型，并允许
+// 通过环境变量覆盖以路由到 Grok、Gemini 或 DeepSeek 等替代提供商。
+// 非 Claude 模型名称将原样传递。
 func mapModel(claudeModel string, cfg *config.Config) string {
 	modelLower := strings.ToLower(claudeModel)
 
-	// Haiku tier
+	// Haiku 层级
 	if strings.Contains(modelLower, "haiku") {
 		if cfg.HaikuModel != "" {
 			return cfg.HaikuModel
@@ -179,7 +179,7 @@ func mapModel(claudeModel string, cfg *config.Config) string {
 		return DefaultHaikuModel
 	}
 
-	// Sonnet tier
+	// Sonnet 层级
 	if strings.Contains(modelLower, "sonnet") {
 		if cfg.SonnetModel != "" {
 			return cfg.SonnetModel
@@ -187,7 +187,7 @@ func mapModel(claudeModel string, cfg *config.Config) string {
 		return DefaultSonnetModel
 	}
 
-	// Opus tier
+	// Opus 层级
 	if strings.Contains(modelLower, "opus") {
 		if cfg.OpusModel != "" {
 			return cfg.OpusModel
@@ -195,23 +195,23 @@ func mapModel(claudeModel string, cfg *config.Config) string {
 		return DefaultOpusModel
 	}
 
-	// Pass through non-Claude models (OpenAI, OpenRouter, etc.)
+	// 非 Claude 模型直接传递（OpenAI、OpenRouter 等）
 	return claudeModel
 }
 
-// convertMessages converts Claude messages to OpenAI format.
+// convertMessages 将 Claude 消息转换为 OpenAI 格式。
 //
-// Handles three content types:
-//   - String content: Simple text messages
-//   - Array content with blocks: text, tool_use (mapped to tool_calls), and tool_result (mapped to role=tool)
-//   - Tool results: Special handling to create OpenAI tool response messages
+// 处理三种内容类型：
+//   - 字符串内容：简单文本消息
+//   - 包含块的数组内容：text、tool_use（映射到 tool_calls）和 tool_result（映射到 role=tool）
+//   - 工具结果：特殊处理以创建 OpenAI 工具响应消息
 //
-// The function maintains the conversation flow while translating Claude's content block
-// structure to OpenAI's message format, ensuring tool call IDs are preserved for correlation.
+// 该函数在翻译 Claude 的内容块结构到 OpenAI 的消息格式时保持对话流程，
+// 确保工具调用 ID 被保留以用于关联。
 func convertMessages(claudeMessages []models.ClaudeMessage, system string) []models.OpenAIMessage {
 	openaiMessages := []models.OpenAIMessage{}
 
-	// Add system message if present
+	// 如果存在系统消息，添加它
 	if system != "" {
 		openaiMessages = append(openaiMessages, models.OpenAIMessage{
 			Role:    "system",
@@ -219,24 +219,24 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 		})
 	}
 
-	// Convert each Claude message
+	// 转换每条 Claude 消息
 	for _, msg := range claudeMessages {
-		// Handle content (can be string or array of blocks)
+		// 处理内容（可以是字符串或块数组）
 		switch content := msg.Content.(type) {
 		case string:
-			// Simple text message
+			// 简单文本消息
 			openaiMessages = append(openaiMessages, models.OpenAIMessage{
 				Role:    msg.Role,
 				Content: content,
 			})
 
 		case []interface{}:
-			// Handle complex content blocks
+			// 处理复杂内容块
 			var textParts []string
 			var toolCalls []models.OpenAIToolCall
 			var hasToolResult bool
 
-			// First pass: check if this is a tool result message
+			// 第一遍：检查是否为工具结果消息
 			for _, block := range content {
 				if blockMap, ok := block.(map[string]interface{}); ok {
 					if blockMap["type"] == "tool_result" {
@@ -246,25 +246,25 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 				}
 			}
 
-			// Process blocks based on type
+			// 根据类型处理块
 			for _, block := range content {
 				if blockMap, ok := block.(map[string]interface{}); ok {
 					blockType := blockMap["type"]
 
 					switch blockType {
 					case "text":
-						// Extract text content
+						// 提取文本内容
 						if text, ok := blockMap["text"].(string); ok {
 							textParts = append(textParts, text)
 						}
 
 					case "tool_use":
-						// Convert tool_use to OpenAI's tool_calls format
+						// 将 tool_use 转换为 OpenAI 的 tool_calls 格式
 						toolUseID, _ := blockMap["id"].(string)
 						toolName, _ := blockMap["name"].(string)
 						toolInput := blockMap["input"]
 
-						// Marshal input to JSON string
+						// 将 input 序列化为 JSON 字符串
 						var inputJSON string
 						if toolInput != nil {
 							if inputBytes, err := json.Marshal(toolInput); err == nil {
@@ -281,15 +281,15 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 						toolCalls = append(toolCalls, toolCall)
 
 					case "tool_result":
-						// Convert tool_result to OpenAI's tool message format
+						// 将 tool_result 转换为 OpenAI 的 tool 消息格式
 						toolUseID, _ := blockMap["tool_use_id"].(string)
 						toolContent := ""
 
-						// Extract content from tool result
+						// 从工具结果中提取内容
 						if resultContent, ok := blockMap["content"].(string); ok {
 							toolContent = resultContent
 						} else if resultContent, ok := blockMap["content"].([]interface{}); ok {
-							// Handle complex content in tool results
+							// 处理工具结果中的复杂内容
 							var contentParts []string
 							for _, item := range resultContent {
 								if itemMap, ok := item.(map[string]interface{}); ok {
@@ -312,7 +312,7 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 				}
 			}
 
-			// Add assistant message with text and/or tool calls
+			// 添加包含文本和/或工具调用的助手消息
 			if len(textParts) > 0 || len(toolCalls) > 0 {
 				if !hasToolResult {
 					textContent := strings.Join(textParts, "\n")
@@ -325,7 +325,7 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 			}
 
 		default:
-			// Unknown content type, try to add as-is
+			// 未知内容类型，尝试原样添加
 			openaiMessages = append(openaiMessages, models.OpenAIMessage{
 				Role:    msg.Role,
 				Content: content,
@@ -389,7 +389,7 @@ func enhanceToolDescription(toolName, description string) string {
 	return description + paramHint
 }
 
-// ConvertResponse converts an OpenAI response to Claude format
+// ConvertResponse 将 OpenAI 响应转换为 Claude 格式
 func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (*models.ClaudeResponse, error) {
 	if len(openaiResp.Choices) == 0 {
 		return nil, fmt.Errorf("no choices in OpenAI response")
@@ -397,11 +397,11 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 
 	choice := openaiResp.Choices[0]
 
-	// Convert content to Claude format
+	// 将内容转换为 Claude 格式
 	var contentBlocks []models.ContentBlock
 
-	// Handle reasoning_details (convert to thinking blocks)
-	// This must come BEFORE other content blocks
+	// 处理 reasoning_details（转换为思考块）
+	// 这必须在其他内容块之前
 	if len(choice.Message.ReasoningDetails) > 0 {
 		emptySignature := "" // 用于创建空字符串指针
 		for _, reasoningDetail := range choice.Message.ReasoningDetails {
@@ -411,16 +411,21 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 					contentBlocks = append(contentBlocks, models.ContentBlock{
 						Type:      "thinking",
 						Thinking:  thinkingText,
-						Signature: &emptySignature, // Required for Claude Code to hide/show thinking
+						Signature: &emptySignature, // Claude Code 正确隐藏/显示思考块所必需
 					})
 				}
 			}
 		}
 	}
 
-	// Handle text content
+	// 用于跟踪已处理的工具调用 ID，防止双重处理
+	// 当后端同时返回 Claude 原生格式（content 数组中的 tool_use）和 OpenAI 格式（tool_calls 数组）时
+	// 需要去重以避免同一个工具调用被处理两次
+	processedToolIDs := make(map[string]bool)
+
+	// 处理文本内容
 	if choice.Message.Content != nil {
-		// Handle string content
+		// 处理字符串内容
 		if contentStr, ok := choice.Message.Content.(string); ok && contentStr != "" {
 			contentBlocks = append(contentBlocks, models.ContentBlock{
 				Type: "text",
@@ -428,25 +433,25 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 			})
 		}
 
-		// Handle array content (native Claude format from some providers)
-		// Some OpenAI-compatible APIs may directly return Claude-style content blocks
+		// 处理数组内容（某些提供商的 Claude 原生格式）
+		// 某些 OpenAI 兼容 API 可能直接返回 Claude 风格的内容块
 		if contentArr, ok := choice.Message.Content.([]interface{}); ok {
 			for _, block := range contentArr {
 				if blockMap, ok := block.(map[string]interface{}); ok {
 					blockType, _ := blockMap["type"].(string)
 					switch blockType {
 					case "thinking":
-						// Native Claude thinking block
+						// Claude 原生思考块
 						if thinking, ok := blockMap["thinking"].(string); ok {
 							emptySignature := "" // 用于创建空字符串指针
 							contentBlocks = append(contentBlocks, models.ContentBlock{
 								Type:      "thinking",
 								Thinking:  thinking,
-								Signature: &emptySignature, // Required for Claude Code
+								Signature: &emptySignature, // Claude Code 所必需
 							})
 						}
 					case "text":
-						// Native Claude text block
+						// Claude 原生文本块
 						if text, ok := blockMap["text"].(string); ok {
 							contentBlocks = append(contentBlocks, models.ContentBlock{
 								Type: "text",
@@ -454,7 +459,7 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 							})
 						}
 					case "tool_use":
-						// Native Claude tool_use block
+						// Claude 原生 tool_use 块
 						toolID, _ := blockMap["id"].(string)
 						toolName, _ := blockMap["name"].(string)
 						toolInput := blockMap["input"]
@@ -463,6 +468,9 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 						if toolID == "" {
 							toolID = fmt.Sprintf("toolu_%d", time.Now().UnixNano())
 						}
+
+						// 标记此工具调用已处理
+						processedToolIDs[toolID] = true
 
 						contentBlocks = append(contentBlocks, models.ContentBlock{
 							Type:  "tool_use",
@@ -476,8 +484,13 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 		}
 	}
 
-	// Handle tool calls (convert to tool_use blocks)
+	// 处理工具调用（转换为 tool_use 块）
+	// 跳过已经从 content 数组中处理过的工具调用
 	for _, toolCall := range choice.Message.ToolCalls {
+		// 检查是否已经处理过此工具调用
+		if processedToolIDs[toolCall.ID] {
+			continue
+		}
 		contentBlocks = append(contentBlocks, models.ContentBlock{
 			Type:  "tool_use",
 			ID:    toolCall.ID,
@@ -486,20 +499,20 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 		})
 	}
 
-	// Convert finish reason
+	// 转换完成原因
 	var stopReason *string
 	if choice.FinishReason != nil {
 		reason := convertFinishReason(*choice.FinishReason)
 		stopReason = &reason
 	}
 
-	// Build Claude response
+	// 构建 Claude 响应
 	claudeResp := &models.ClaudeResponse{
 		ID:         openaiResp.ID,
 		Type:       "message",
 		Role:       "assistant",
 		Content:    contentBlocks,
-		Model:      requestedModel, // Use original requested model
+		Model:      requestedModel, // 使用原始请求的模型
 		StopReason: stopReason,
 		Usage: models.Usage{
 			InputTokens:  openaiResp.Usage.PromptTokens,
@@ -510,7 +523,7 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 	return claudeResp, nil
 }
 
-// convertFinishReason maps OpenAI finish reasons to Claude format
+// convertFinishReason 将 OpenAI 的完成原因映射到 Claude 格式
 func convertFinishReason(openaiReason string) string {
 	switch openaiReason {
 	case "stop":
@@ -520,16 +533,15 @@ func convertFinishReason(openaiReason string) string {
 	case "tool_calls":
 		return "tool_use"
 	case "content_filter":
-		return "end_turn" // Claude doesn't have exact equivalent
+		return "end_turn" // Claude 没有完全对应的值
 	default:
 		return "end_turn"
 	}
 }
 
-// sanitizeToolInput fixes common model errors where parameters are malformed.
-// Specifically handles the issue where "query" parameter is hallucinated instead of
-// the correct required parameters (file_path, command, pattern, etc.).
-// This function ALWAYS removes the "query" parameter as it's never valid for any tool.
+// sanitizeToolInput 修复参数格式错误的常见模型错误。
+// 特别处理模型幻觉出 "query" 参数而不是正确的必需参数（file_path、command、pattern 等）的问题。
+// 此函数始终移除 "query" 参数，因为它对任何工具都无效。
 func sanitizeToolInput(toolName string, argsJSON string) interface{} {
 	// 处理空字符串或空白字符串的情况
 	argsJSON = strings.TrimSpace(argsJSON)
@@ -540,32 +552,31 @@ func sanitizeToolInput(toolName string, argsJSON string) interface{} {
 
 	var input map[string]interface{}
 	if err := json.Unmarshal([]byte(argsJSON), &input); err != nil {
-		// If it's not a JSON object, return as is (likely a string or primitive)
+		// 如果不是 JSON 对象，原样返回（可能是字符串或原始类型）
 		return argsJSON
 	}
 
-	// Always sanitize the input regardless of query presence
+	// 无论是否存在 query，始终清理输入
 	return SanitizeToolArgs(toolName, input)
 }
 
-// SanitizeToolArgs fixes tool arguments by removing invalid "query" parameter
-// and mapping it to the correct required parameter based on tool type.
-// This is exported so it can be used in both streaming and non-streaming handlers.
+// SanitizeToolArgs 通过移除无效的 "query" 参数并根据工具类型将其映射到正确的必需参数来修复工具参数。
+// 导出此函数以便在流式和非流式处理器中使用。
 //
-// This function handles several scenarios:
-// 1. Model sends {"query": "..."} instead of proper parameters
-// 2. Model sends {"query": "{...}"} with JSON-encoded parameters inside
-// 3. Model sends correct parameters with an extra "query" field
+// 此函数处理以下几种情况：
+// 1. 模型发送 {"query": "..."} 而不是正确的参数
+// 2. 模型发送 {"query": "{...}"} 内部包含 JSON 编码的参数
+// 3. 模型发送正确的参数但附带额外的 "query" 字段
 func SanitizeToolArgs(toolName string, input map[string]interface{}) map[string]interface{} {
 	if input == nil {
 		// 返回空对象而不是 nil，避免工具调用失败
 		return map[string]interface{}{}
 	}
 
-	// Normalize tool name to lowercase for matching
+	// 将工具名称标准化为小写以进行匹配
 	toolNameLower := strings.ToLower(toolName)
 
-	// Extract and remove query parameter if present (case-insensitive)
+	// 如果存在 query 参数则提取并移除（不区分大小写）
 	var queryContent string
 	for key, val := range input {
 		if strings.ToLower(key) == "query" {
@@ -576,33 +587,33 @@ func SanitizeToolArgs(toolName string, input map[string]interface{}) map[string]
 		}
 	}
 
-	// If no query was found, just return the input as-is
+	// 如果没有找到 query，直接返回原始输入
 	if queryContent == "" {
 		return input
 	}
 
-	// First, try to parse query as JSON object and merge into input
-	// This handles cases where model sends {"query": "{\"file_path\":\"...\", \"old_string\":\"...\"}"}
+	// 首先，尝试将 query 解析为 JSON 对象并合并到输入中
+	// 这处理模型发送 {"query": "{\"file_path\":\"...\", \"old_string\":\"...\"}"} 的情况
 	if strings.HasPrefix(strings.TrimSpace(queryContent), "{") {
 		var parsedQuery map[string]interface{}
 		if err := json.Unmarshal([]byte(queryContent), &parsedQuery); err == nil {
-			// Merge parsed query into input (don't overwrite existing keys)
+			// 将解析的 query 合并到输入中（不覆盖现有键）
 			for k, v := range parsedQuery {
 				if _, exists := input[k]; !exists {
 					input[k] = v
 				}
 			}
-			// After merging, if we have all required params, return
+			// 合并后，如果有所有必需参数，则返回
 			if hasRequiredParams(toolNameLower, input) {
 				return input
 			}
 		}
 	}
 
-	// Map query content to the correct required parameter based on tool type
-	// Using contains for fuzzy matching to handle variations like "mcp__xxx__Edit"
+	// 根据工具类型将 query 内容映射到正确的必需参数
+	// 使用 contains 进行模糊匹配以处理 "mcp__xxx__Edit" 等变体
 	switch {
-	// Edit tool: requires file_path, old_string, new_string
+	// Edit 工具：需要 file_path、old_string、new_string
 	case strings.Contains(toolNameLower, "edit"):
 		if _, ok := input["file_path"]; !ok {
 			input["file_path"] = queryContent
@@ -614,29 +625,29 @@ func SanitizeToolArgs(toolName string, input map[string]interface{}) map[string]
 			input["new_string"] = queryContent
 		}
 
-	// Grep tool: requires pattern
+	// Grep 工具：需要 pattern
 	case strings.Contains(toolNameLower, "grep"):
 		if _, ok := input["pattern"]; !ok {
 			input["pattern"] = queryContent
 		}
-		// Also set default path if missing
+		// 如果缺少 path 则设置默认值
 		if _, ok := input["path"]; !ok {
 			input["path"] = "."
 		}
 
-	// Bash tool: requires command
+	// Bash 工具：需要 command
 	case strings.Contains(toolNameLower, "bash"):
 		if _, ok := input["command"]; !ok {
 			input["command"] = queryContent
 		}
 
-	// Read/ReadFile tool: requires file_path
+	// Read/ReadFile 工具：需要 file_path
 	case strings.Contains(toolNameLower, "read"):
 		if _, ok := input["file_path"]; !ok {
 			input["file_path"] = queryContent
 		}
 
-	// Write/WriteFile tool: requires file_path, content
+	// Write/WriteFile 工具：需要 file_path、content
 	case strings.Contains(toolNameLower, "write"):
 		if _, ok := input["file_path"]; !ok {
 			input["file_path"] = queryContent
@@ -645,38 +656,38 @@ func SanitizeToolArgs(toolName string, input map[string]interface{}) map[string]
 			input["content"] = queryContent
 		}
 
-	// Glob tool: requires pattern
+	// Glob 工具：需要 pattern
 	case strings.Contains(toolNameLower, "glob"):
 		if _, ok := input["pattern"]; !ok {
 			input["pattern"] = queryContent
 		}
 
-	// LSP tool: requires filePath
+	// LSP 工具：需要 filePath
 	case strings.Contains(toolNameLower, "lsp"):
 		if _, ok := input["filePath"]; !ok {
 			input["filePath"] = queryContent
 		}
 
-	// Task tool: use prompt (但不处理TodoWrite，因为它需要todos数组)
+	// Task 工具：使用 prompt（但不处理 TodoWrite，因为它需要 todos 数组）
 	case strings.Contains(toolNameLower, "task") && !strings.Contains(toolNameLower, "todo"):
 		if _, ok := input["prompt"]; !ok {
 			input["prompt"] = queryContent
 		}
 
-	// WebFetch/WebSearch: use url or query as appropriate
+	// WebFetch/WebSearch：根据情况使用 url 或 query
 	case strings.Contains(toolNameLower, "webfetch") || strings.Contains(toolNameLower, "fetch"):
 		if _, ok := input["url"]; !ok {
 			input["url"] = queryContent
 		}
 	case strings.Contains(toolNameLower, "websearch") || strings.Contains(toolNameLower, "search"):
-		// WebSearch actually uses "query" - but we already removed it, so restore it
+		// WebSearch 实际使用 "query" - 但我们已经移除了它，所以恢复它
 		input["query"] = queryContent
 	}
 
 	return input
 }
 
-// hasRequiredParams checks if the input has the minimum required parameters for a tool
+// hasRequiredParams 检查输入是否具有工具所需的最少必需参数
 func hasRequiredParams(toolNameLower string, input map[string]interface{}) bool {
 	switch {
 	case strings.Contains(toolNameLower, "edit"):

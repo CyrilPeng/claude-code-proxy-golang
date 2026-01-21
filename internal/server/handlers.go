@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"claude-code-proxy/internal/config"
-	"claude-code-proxy/internal/converter"
-	"claude-code-proxy/pkg/models"
+	"github.com/CyrilPeng/claude-code-proxy-golang/internal/config"
+	"github.com/CyrilPeng/claude-code-proxy-golang/internal/converter"
+	"github.com/CyrilPeng/claude-code-proxy-golang/pkg/models"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -314,6 +314,10 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 	thinkingBlockIndex := -1 // -1 表示尚未分配
 
 	currentToolCalls := make(map[int]*ToolCallState)
+	// 用于跟踪已处理的工具调用 ID，防止双重处理
+	// 当后端同时返回 Claude 原生格式（content 数组中的 tool_use）和 OpenAI 格式（tool_calls 数组）时
+	// 需要去重以避免同一个工具调用被处理两次
+	processedToolIDs := make(map[string]bool)
 	finalStopReason := "end_turn"
 	usageData := map[string]interface{}{
 		"input_tokens":                0,
@@ -644,6 +648,16 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 							toolID = fmt.Sprintf("toolu_%d", time.Now().UnixNano())
 						}
 
+						// 检查是否已经处理过此工具调用（防止双重处理）
+						if processedToolIDs[toolID] {
+							if cfg.Debug {
+								fmt.Printf("[调试] 跳过已处理的工具调用: ID=%s\n", toolID)
+							}
+							continue
+						}
+						// 标记此工具调用已处理
+						processedToolIDs[toolID] = true
+
 						// 创建新的工具调用状态
 						tcIndex := len(currentToolCalls)
 						currentToolCalls[tcIndex] = &ToolCallState{
@@ -814,6 +828,13 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 
 					// 如果提供了工具调用 ID 则更新
 					if id, ok := tcDelta["id"].(string); ok {
+						// 检查是否已经处理过此工具调用（防止双重处理）
+						if processedToolIDs[id] {
+							if cfg.Debug {
+								fmt.Printf("[调试] 跳过已处理的工具调用 (tool_calls): ID=%s\n", id)
+							}
+							continue
+						}
 						toolCall.ID = id
 					}
 
@@ -858,6 +879,16 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 									fmt.Printf("[调试] 为工具 %s 生成 ID: %s\n", toolCall.Name, toolCall.ID)
 								}
 							}
+
+							// 再次检查是否已处理（ID 可能是新生成的或刚刚设置的）
+							if processedToolIDs[toolCall.ID] {
+								if cfg.Debug {
+									fmt.Printf("[调试] 跳过已处理的工具调用 (启动时): ID=%s\n", toolCall.ID)
+								}
+								continue
+							}
+							// 标记此工具调用已处理
+							processedToolIDs[toolCall.ID] = true
 
 							toolCall.ClaudeIndex = nextIndex
 							nextIndex++
@@ -988,6 +1019,16 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 					fmt.Printf("[调试] 为工具 %s 生成 ID: %s\n", toolData.Name, toolData.ID)
 				}
 			}
+
+			// 检查是否已处理（防止双重处理）
+			if processedToolIDs[toolData.ID] {
+				if cfg.Debug {
+					fmt.Printf("[调试] 跳过已处理的工具调用 (延迟启动): ID=%s\n", toolData.ID)
+				}
+				continue
+			}
+			// 标记此工具调用已处理
+			processedToolIDs[toolData.ID] = true
 
 			toolData.ClaudeIndex = nextIndex
 			nextIndex++

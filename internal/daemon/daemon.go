@@ -162,7 +162,7 @@ func readPID() (int, error) {
 }
 
 func cleanupPID() {
-	_ = os.Remove(pidFile) // Ignore error - cleanup is best-effort
+	_ = os.Remove(pidFile) // 忽略错误
 }
 
 func isProcessRunning() bool {
@@ -176,7 +176,7 @@ func isProcessRunning() bool {
 		return false
 	}
 
-	// Send signal 0 to check if process exists
+	// 发送信号 0 检查进程是否存在
 	err = process.Signal(syscall.Signal(0))
 	return err == nil
 }

@@ -3,7 +3,6 @@ package server
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/CyrilPeng/claude-code-proxy-golang/internal/config"
 	"github.com/CyrilPeng/claude-code-proxy-golang/internal/converter"
+	"github.com/CyrilPeng/claude-code-proxy-golang/pkg/json"
 	"github.com/CyrilPeng/claude-code-proxy-golang/pkg/models"
 	"github.com/gofiber/fiber/v2"
 )
@@ -298,72 +298,21 @@ type ToolCallState struct {
 }
 
 // streamOpenAIToClaude 将 OpenAI 流式响应转换为 Claude 的 SSE 事件格式。
+// 使用 StreamProcessor 进行模块化处理。
 func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel string, cfg *config.Config, startTime time.Time) {
 	if cfg.Debug {
 		fmt.Printf("[调试] streamOpenAIToClaude：开始转换\n")
 	}
+
+	// 创建流处理器
+	processor := NewStreamProcessor(w, providerModel, cfg, startTime)
+
+	// 发送初始事件
+	processor.SendMessageStart()
+
+	// 创建扫描器
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 增加缓冲区大小
-
-	// 状态变量
-	messageID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
-
-	// 使用动态自增索引防止索引不连续问题
-	nextIndex := 0
-	textBlockIndex := -1     // -1 表示尚未分配
-	thinkingBlockIndex := -1 // -1 表示尚未分配
-
-	currentToolCalls := make(map[int]*ToolCallState)
-	// 用于跟踪已处理的工具调用 ID，防止双重处理
-	// 当后端同时返回 Claude 原生格式（content 数组中的 tool_use）和 OpenAI 格式（tool_calls 数组）时
-	// 需要去重以避免同一个工具调用被处理两次
-	processedToolIDs := make(map[string]bool)
-	finalStopReason := "end_turn"
-	usageData := map[string]interface{}{
-		"input_tokens":                0,
-		"output_tokens":               0,
-		"cache_creation_input_tokens": 0,
-		"cache_read_input_tokens":     0,
-		"cache_creation": map[string]interface{}{
-			"ephemeral_5m_input_tokens": 0,
-			"ephemeral_1h_input_tokens": 0,
-		},
-	}
-
-	// 思考块跟踪（用于在 Claude Code 中显示思考指示器）
-	thinkingBlockStarted := false
-	thinkingBlockHasContent := false
-	textBlockStarted := false // 跟踪是否已发送文本块的 block_start
-
-	// 发送初始 SSE 事件
-	writeSSEEvent(w, "message_start", map[string]interface{}{
-		"type": "message_start",
-		"message": map[string]interface{}{
-			"id":            messageID,
-			"type":          "message",
-			"role":          "assistant",
-			"model":         providerModel,
-			"content":       []interface{}{},
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]interface{}{
-				"input_tokens":                0,
-				"output_tokens":               0,
-				"cache_creation_input_tokens": 0,
-				"cache_read_input_tokens":     0,
-				"cache_creation": map[string]interface{}{
-					"ephemeral_5m_input_tokens": 0,
-					"ephemeral_1h_input_tokens": 0,
-				},
-			},
-		},
-	})
-
-	writeSSEEvent(w, "ping", map[string]interface{}{
-		"type": "ping",
-	})
-
-	_ = w.Flush()
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	// 处理流式数据块
 	for scanner.Scan() {
@@ -391,19 +340,15 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 			continue
 		}
 
-		// 记录每个数据块以查看 OpenRouter 发送的内容
 		if cfg.Debug {
 			fmt.Printf("[调试] 来自提供商的原始数据块: %s\n", dataJSON)
 		}
 
-		// 检测是否是 Claude 原生 SSE 事件格式
-		// 某些提供商可能直接返回 Claude 原生格式而不是 OpenAI 格式
+		// 检测 Claude 原生 SSE 事件格式，直接透传
 		if chunkType, ok := chunk["type"].(string); ok {
-			// 这是 Claude 原生格式，直接透传
 			if cfg.Debug {
 				fmt.Printf("[调试] 检测到 Claude 原生格式: type=%s\n", chunkType)
 			}
-			// 直接写入原始 SSE 事件
 			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", chunkType, dataJSON); err == nil {
 				_ = w.Flush()
 			}
@@ -412,36 +357,7 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 
 		// 处理使用量数据
 		if usage, ok := chunk["usage"].(map[string]interface{}); ok {
-			if cfg.Debug {
-				usageJSON, _ := json.Marshal(usage)
-				fmt.Printf("[调试] 收到来自 OpenAI 的使用量: %s\n", string(usageJSON))
-			}
-
-			// 将 float64 转换为 int（JSON 将数字解析为 float64）
-			inputTokens := 0
-			outputTokens := 0
-			if val, ok := usage["prompt_tokens"].(float64); ok {
-				inputTokens = int(val)
-			}
-			if val, ok := usage["completion_tokens"].(float64); ok {
-				outputTokens = int(val)
-			}
-
-			usageData = map[string]interface{}{
-				"input_tokens":  inputTokens,
-				"output_tokens": outputTokens,
-			}
-
-			// 如果存在缓存指标则添加
-			if promptTokensDetails, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
-				if cachedTokens, ok := promptTokensDetails["cached_tokens"].(float64); ok && cachedTokens > 0 {
-					usageData["cache_read_input_tokens"] = int(cachedTokens)
-				}
-			}
-			if cfg.Debug {
-				usageDataJSON, _ := json.Marshal(usageData)
-				fmt.Printf("[调试] 累积的使用量数据: %s\n", string(usageDataJSON))
-			}
+			processor.HandleUsageData(usage)
 		}
 
 		// 从 choices 中提取 delta
@@ -453,10 +369,8 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 		choice := choices[0].(map[string]interface{})
 
 		// 尝试从 delta 或 message 字段获取数据
-		// 某些模型（如 thinking 模型）可能在 message 字段而不是 delta 字段中返回数据
 		delta, ok := choice["delta"].(map[string]interface{})
 		if !ok {
-			// 尝试从 message 字段获取（某些 API 在流式响应中使用 message）
 			if message, msgOk := choice["message"].(map[string]interface{}); msgOk {
 				delta = message
 				ok = true
@@ -466,727 +380,32 @@ func streamOpenAIToClaude(w *bufio.Writer, reader io.Reader, providerModel strin
 			continue
 		}
 
-		// 处理推理 delta（思考块）
-		// 支持 OpenRouter 和 OpenAI 两种格式：
-		// - OpenRouter: delta.reasoning_details（数组）
-		// - OpenAI o1/o3: delta.reasoning_content（字符串）
-
-		// 首先检查 OpenAI 的 reasoning_content 格式（o1/o3 模型）
-		if reasoningContent, ok := delta["reasoning_content"].(string); ok && reasoningContent != "" {
-			// 在第一个思考 delta 时发送思考块的 content_block_start
-			if !thinkingBlockStarted {
-				thinkingBlockIndex = nextIndex
-				nextIndex++
-
-				writeSSEEvent(w, "content_block_start", map[string]interface{}{
-					"type":  "content_block_start",
-					"index": thinkingBlockIndex,
-					"content_block": map[string]interface{}{
-						"type":      "thinking",
-						"thinking":  "", // 必需，防止思考块验证失败
-						"signature": "", // 必需，让 Claude Code 正确隐藏/显示思考块
-					},
-				})
-				thinkingBlockStarted = true
-				thinkingBlockHasContent = true
-			}
-
-			// 发送思考 delta
-			writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": thinkingBlockIndex,
-				"delta": map[string]interface{}{
-					"type":     "thinking_delta",
-					"thinking": reasoningContent,
-				},
-			})
-		}
-
-		// 然后检查 OpenRouter 的 reasoning_details 格式
-		// 仅在尚未处理 reasoning 字段时处理 reasoning_details
-		if reasoningDetailsRaw, ok := delta["reasoning_details"]; ok && delta["reasoning"] == nil {
-			if reasoningDetails, ok := reasoningDetailsRaw.([]interface{}); ok && len(reasoningDetails) > 0 {
-				for _, detailRaw := range reasoningDetails {
-					if detail, ok := detailRaw.(map[string]interface{}); ok {
-						// 从详情中提取推理文本
-						thinkingText := ""
-						detailType, _ := detail["type"].(string)
-
-						switch detailType {
-						case "reasoning.text":
-							if text, ok := detail["text"].(string); ok {
-								thinkingText = text
-							}
-						case "reasoning.summary":
-							if summary, ok := detail["summary"].(string); ok {
-								thinkingText = summary
-							}
-						case "reasoning.encrypted":
-							// 在流式传输中跳过加密/编辑的推理
-							continue
-						}
-
-						if thinkingText != "" {
-							// 在第一个思考 delta 时发送思考块的 content_block_start
-							if !thinkingBlockStarted {
-								thinkingBlockIndex = nextIndex
-								nextIndex++
-
-								writeSSEEvent(w, "content_block_start", map[string]interface{}{
-									"type":  "content_block_start",
-									"index": thinkingBlockIndex,
-									"content_block": map[string]interface{}{
-										"type":      "thinking",
-										"thinking":  "",
-										"signature": "", // 必需，让 Claude Code 正确隐藏/显示思考块
-									},
-								})
-								thinkingBlockStarted = true
-								_ = w.Flush()
-							}
-
-							// 发送思考块 delta
-							writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-								"type":  "content_block_delta",
-								"index": thinkingBlockIndex,
-								"delta": map[string]interface{}{
-									"type":     "thinking_delta",
-									"thinking": thinkingText,
-								},
-							})
-							thinkingBlockHasContent = true
-							_ = w.Flush()
-						}
-					}
-				}
-			}
-		}
-
-		// 直接处理 reasoning 字段（某些模型的简化格式）
-		if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
-			// 在第一个思考 delta 时发送思考块的 content_block_start
-			if !thinkingBlockStarted {
-				thinkingBlockIndex = nextIndex
-				nextIndex++
-
-				writeSSEEvent(w, "content_block_start", map[string]interface{}{
-					"type":  "content_block_start",
-					"index": thinkingBlockIndex,
-					"content_block": map[string]interface{}{
-						"type":      "thinking",
-						"thinking":  "",
-						"signature": "", // 必需，让 Claude Code 正确隐藏/显示思考块
-					},
-				})
-				thinkingBlockStarted = true
-				_ = w.Flush()
-			}
-
-			// 发送思考块 delta
-			writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": thinkingBlockIndex,
-				"delta": map[string]interface{}{
-					"type":     "thinking_delta",
-					"thinking": reasoning,
-				},
-			})
-			thinkingBlockHasContent = true
-			_ = w.Flush()
-		}
+		// 处理思考块（reasoning_content, reasoning_details, reasoning）
+		processor.HandleThinkingDelta(delta)
 
 		// 处理文本 delta
 		if content, ok := delta["content"].(string); ok && content != "" {
-			// 在第一个文本 delta 时发送文本块的 content_block_start
-			if !textBlockStarted {
-				textBlockIndex = nextIndex
-				nextIndex++
-
-				writeSSEEvent(w, "content_block_start", map[string]interface{}{
-					"type":  "content_block_start",
-					"index": textBlockIndex,
-					"content_block": map[string]interface{}{
-						"type": "text",
-						"text": "",
-					},
-				})
-				textBlockStarted = true
-				_ = w.Flush()
-			}
-
-			writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": textBlockIndex,
-				"delta": map[string]interface{}{
-					"type": "text_delta",
-					"text": content,
-				},
-			})
-			_ = w.Flush()
+			processor.HandleTextDelta(content)
 		}
 
-		// 处理 content 数组格式（Claude 原生格式的 tool_use 块）
-		// 某些提供商（如通过 OpenAI 兼容 API 代理的 Claude 模型）可能在 content 数组中返回工具调用
+		// 处理 content 数组格式（Claude 原生格式）
 		if contentArr, ok := delta["content"].([]interface{}); ok && len(contentArr) > 0 {
-			for _, block := range contentArr {
-				if blockMap, ok := block.(map[string]interface{}); ok {
-					blockType, _ := blockMap["type"].(string)
-
-					switch blockType {
-					case "tool_use":
-						// 从 Claude 原生格式的 tool_use 块中提取工具调用
-						toolID, _ := blockMap["id"].(string)
-						toolName, _ := blockMap["name"].(string)
-						toolInput := blockMap["input"]
-
-						if cfg.Debug {
-							fmt.Printf("[调试] 从 content 数组中提取 tool_use: ID=%s, Name=%s, Input=%v\n", toolID, toolName, toolInput)
-						}
-
-						// 如果没有 ID，生成一个
-						if toolID == "" {
-							toolID = fmt.Sprintf("toolu_%d", time.Now().UnixNano())
-						}
-
-						// 检查是否已经处理过此工具调用（防止双重处理）
-						if processedToolIDs[toolID] {
-							if cfg.Debug {
-								fmt.Printf("[调试] 跳过已处理的工具调用: ID=%s\n", toolID)
-							}
-							continue
-						}
-						// 标记此工具调用已处理
-						processedToolIDs[toolID] = true
-
-						// 创建新的工具调用状态
-						tcIndex := len(currentToolCalls)
-						currentToolCalls[tcIndex] = &ToolCallState{
-							ID:          toolID,
-							Name:        toolName,
-							ArgsBuffer:  "",
-							JSONSent:    false,
-							ClaudeIndex: nextIndex,
-							Started:     true,
-						}
-						nextIndex++
-
-						// 序列化 input
-						var inputJSON string
-						if toolInput != nil {
-							if inputBytes, err := json.Marshal(toolInput); err == nil {
-								inputJSON = string(inputBytes)
-							}
-						}
-						if inputJSON == "" {
-							inputJSON = "{}"
-						}
-						currentToolCalls[tcIndex].ArgsBuffer = inputJSON
-
-						// 如果没有启动文本块，在工具块之前创建占位符
-						if !textBlockStarted {
-							textBlockIndex = nextIndex
-							nextIndex++
-
-							writeSSEEvent(w, "content_block_start", map[string]interface{}{
-								"type":  "content_block_start",
-								"index": textBlockIndex,
-								"content_block": map[string]interface{}{
-									"type": "text",
-									"text": "",
-								},
-							})
-							writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-								"type":  "content_block_delta",
-								"index": textBlockIndex,
-								"delta": map[string]interface{}{
-									"type": "text_delta",
-									"text": "正在调用工具：",
-								},
-							})
-							textBlockStarted = true
-							_ = w.Flush()
-
-							// 更新工具调用的索引
-							currentToolCalls[tcIndex].ClaudeIndex = nextIndex
-							nextIndex++
-						}
-
-						// 发送 content_block_start
-						writeSSEEvent(w, "content_block_start", map[string]interface{}{
-							"type":  "content_block_start",
-							"index": currentToolCalls[tcIndex].ClaudeIndex,
-							"content_block": map[string]interface{}{
-								"type":  "tool_use",
-								"id":    toolID,
-								"name":  toolName,
-								"input": map[string]interface{}{},
-							},
-						})
-						_ = w.Flush()
-
-					case "text":
-						// 处理文本块
-						if text, ok := blockMap["text"].(string); ok && text != "" {
-							if !textBlockStarted {
-								textBlockIndex = nextIndex
-								nextIndex++
-
-								writeSSEEvent(w, "content_block_start", map[string]interface{}{
-									"type":  "content_block_start",
-									"index": textBlockIndex,
-									"content_block": map[string]interface{}{
-										"type": "text",
-										"text": "",
-									},
-								})
-								textBlockStarted = true
-								_ = w.Flush()
-							}
-
-							writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-								"type":  "content_block_delta",
-								"index": textBlockIndex,
-								"delta": map[string]interface{}{
-									"type": "text_delta",
-									"text": text,
-								},
-							})
-							_ = w.Flush()
-						}
-
-					case "thinking":
-						// 处理思考块
-						if thinking, ok := blockMap["thinking"].(string); ok && thinking != "" {
-							if !thinkingBlockStarted {
-								thinkingBlockIndex = nextIndex
-								nextIndex++
-
-								writeSSEEvent(w, "content_block_start", map[string]interface{}{
-									"type":  "content_block_start",
-									"index": thinkingBlockIndex,
-									"content_block": map[string]interface{}{
-										"type":      "thinking",
-										"thinking":  "",
-										"signature": "",
-									},
-								})
-								thinkingBlockStarted = true
-								_ = w.Flush()
-							}
-
-							writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-								"type":  "content_block_delta",
-								"index": thinkingBlockIndex,
-								"delta": map[string]interface{}{
-									"type":     "thinking_delta",
-									"thinking": thinking,
-								},
-							})
-							thinkingBlockHasContent = true
-							_ = w.Flush()
-						}
-					}
-				}
-			}
+			processor.HandleContentArray(contentArr)
 		}
 
 		// 处理工具调用 delta
 		if toolCallsRaw, ok := delta["tool_calls"]; ok {
-			// 调试：记录来自提供商的原始 tool_calls
-			if cfg.Debug {
-				toolCallsJSON, _ := json.Marshal(toolCallsRaw)
-				fmt.Printf("[调试] 原始 tool_calls delta: %s\n", string(toolCallsJSON))
-			}
-
-			toolCalls, ok := toolCallsRaw.([]interface{})
-			if ok && len(toolCalls) > 0 {
-				for i, tcRaw := range toolCalls {
-					tcDelta, ok := tcRaw.(map[string]interface{})
-					if !ok {
-						continue
-					}
-
-					// 获取工具调用索引
-					tcIndex := i // 默认使用数组索引
-					if idx, ok := tcDelta["index"].(float64); ok {
-						tcIndex = int(idx)
-					}
-
-					// 如果不存在则初始化工具调用跟踪
-					if _, exists := currentToolCalls[tcIndex]; !exists {
-						currentToolCalls[tcIndex] = &ToolCallState{
-							ID:          "",
-							Name:        "",
-							ArgsBuffer:  "",
-							JSONSent:    false,
-							ClaudeIndex: 0,
-							Started:     false,
-						}
-					}
-
-					toolCall := currentToolCalls[tcIndex]
-
-					// 如果提供了工具调用 ID 则更新
-					if id, ok := tcDelta["id"].(string); ok {
-						// 检查是否已经处理过此工具调用（防止双重处理）
-						if processedToolIDs[id] {
-							if cfg.Debug {
-								fmt.Printf("[调试] 跳过已处理的工具调用 (tool_calls): ID=%s\n", id)
-							}
-							continue
-						}
-						toolCall.ID = id
-					}
-
-					// 如果没有启动文本块，在工具块之前创建占位符
-					if !textBlockStarted {
-						textBlockIndex = nextIndex
-						nextIndex++
-
-						writeSSEEvent(w, "content_block_start", map[string]interface{}{
-							"type":  "content_block_start",
-							"index": textBlockIndex,
-							"content_block": map[string]interface{}{
-								"type": "text",
-								"text": "",
-							},
-						})
-						// 发送占位文本，防止出现 "(no content)" 错误
-						writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-							"type":  "content_block_delta",
-							"index": textBlockIndex,
-							"delta": map[string]interface{}{
-								"type": "text_delta",
-								"text": "正在调用工具：",
-							},
-						})
-						textBlockStarted = true
-						_ = w.Flush()
-					}
-
-					// 更新函数名称
-					if functionData, ok := tcDelta["function"].(map[string]interface{}); ok {
-						if name, ok := functionData["name"].(string); ok {
-							toolCall.Name = name
-						}
-
-						// 当有函数名称时启动内容块
-						// 修复：如果没有 ID，生成一个，确保工具块能正确启动
-						if toolCall.Name != "" && !toolCall.Started {
-							if toolCall.ID == "" {
-								toolCall.ID = fmt.Sprintf("toolu_%d_%d", time.Now().UnixNano(), tcIndex)
-								if cfg.Debug {
-									fmt.Printf("[调试] 为工具 %s 生成 ID: %s\n", toolCall.Name, toolCall.ID)
-								}
-							}
-
-							// 再次检查是否已处理（ID 可能是新生成的或刚刚设置的）
-							if processedToolIDs[toolCall.ID] {
-								if cfg.Debug {
-									fmt.Printf("[调试] 跳过已处理的工具调用 (启动时): ID=%s\n", toolCall.ID)
-								}
-								continue
-							}
-							// 标记此工具调用已处理
-							processedToolIDs[toolCall.ID] = true
-
-							toolCall.ClaudeIndex = nextIndex
-							nextIndex++
-							toolCall.Started = true
-
-							writeSSEEvent(w, "content_block_start", map[string]interface{}{
-								"type":  "content_block_start",
-								"index": toolCall.ClaudeIndex,
-								"content_block": map[string]interface{}{
-									"type":  "tool_use",
-									"id":    toolCall.ID,
-									"name":  toolCall.Name,
-									"input": map[string]interface{}{},
-								},
-							})
-							_ = w.Flush()
-
-							// 关键修复：发送在工具块启动前累积的参数
-							// 某些模型可能在发送 ID/Name 之前就发送了参数
-							if toolCall.ArgsBuffer != "" {
-								writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-									"type":  "content_block_delta",
-									"index": toolCall.ClaudeIndex,
-									"delta": map[string]interface{}{
-										"type":         "input_json_delta",
-										"partial_json": toolCall.ArgsBuffer,
-									},
-								})
-								_ = w.Flush()
-								toolCall.JSONSent = true
-								if cfg.Debug {
-									fmt.Printf("[调试] 工具 %s 发送启动前累积的参数: '%s'\n", toolCall.Name, toolCall.ArgsBuffer)
-								}
-							}
-						}
-
-						// 处理函数参数
-						// 始终累积参数，不管Started状态 - 在流结束时发送完整的 JSON
-						// 修复：移除 toolCall.Started 条件，避免在ID/Name到达前丢失参数
-						var argsChunk string
-						if args, ok := functionData["arguments"].(string); ok {
-							if args != "" {
-								toolCall.ArgsBuffer += args
-								argsChunk = args
-								if cfg.Debug {
-									fmt.Printf("[调试] 工具 %s 累积参数(字符串): '%s', 当前缓冲区: '%s'\n", toolCall.Name, args, toolCall.ArgsBuffer)
-								}
-							}
-						} else if argsMap, ok := functionData["arguments"].(map[string]interface{}); ok {
-							// 某些模型（如 thinking 模型）可能直接返回对象而不是字符串
-							if argsJSON, err := json.Marshal(argsMap); err == nil {
-								toolCall.ArgsBuffer = string(argsJSON)
-								argsChunk = string(argsJSON)
-								if cfg.Debug {
-									fmt.Printf("[调试] 工具 %s 的参数是对象格式: %s\n", toolCall.Name, toolCall.ArgsBuffer)
-								}
-							}
-						} else if functionData["arguments"] != nil {
-							// 其他类型的参数，尝试序列化
-							if argsJSON, err := json.Marshal(functionData["arguments"]); err == nil {
-								toolCall.ArgsBuffer = string(argsJSON)
-								argsChunk = string(argsJSON)
-								if cfg.Debug {
-									fmt.Printf("[调试] 工具 %s 的参数是其他格式: %T -> %s\n", toolCall.Name, functionData["arguments"], toolCall.ArgsBuffer)
-								}
-							}
-						}
-
-						// 关键修复：在流式传输过程中立即发送 input_json_delta 事件
-						// 这样 Claude Code 客户端可以实时看到工具参数内容
-						if toolCall.Started && argsChunk != "" {
-							writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-								"type":  "content_block_delta",
-								"index": toolCall.ClaudeIndex,
-								"delta": map[string]interface{}{
-									"type":         "input_json_delta",
-									"partial_json": argsChunk,
-								},
-							})
-							_ = w.Flush()
-							toolCall.JSONSent = true
-							if cfg.Debug {
-								fmt.Printf("[调试] 工具 %s 发送参数增量: '%s'\n", toolCall.Name, argsChunk)
-							}
-						}
-					}
-				}
-			}
+			processor.HandleToolCallsDelta(toolCallsRaw)
 		}
 
 		// 处理完成原因
-		// 注意：不要在此处中断 - 使用 stream_options.include_usage 时，OpenAI 会在 finish_reason 之后的数据块中发送使用量
 		if finishReason, ok := choice["finish_reason"].(string); ok && finishReason != "" {
-			switch finishReason {
-			case "length":
-				finalStopReason = "max_tokens"
-			case "tool_calls", "function_call":
-				finalStopReason = "tool_use"
-			case "stop":
-				finalStopReason = "end_turn"
-			default:
-				finalStopReason = "end_turn"
-			}
-			// 继续处理以捕获使用量数据块（不中断）
+			processor.HandleFinishReason(finishReason)
 		}
 	}
 
-	// 发送最终 SSE 事件
-
-	// 如果文本块已启动，发送 content_block_stop
-	if textBlockStarted && textBlockIndex != -1 {
-		writeSSEEvent(w, "content_block_stop", map[string]interface{}{
-			"type":  "content_block_stop",
-			"index": textBlockIndex,
-		})
-		_ = w.Flush()
-	}
-
-	// 为每个工具调用发送最终 JSON 和 content_block_stop
-	for tcIndex, toolData := range currentToolCalls {
-		// 关键修复：如果工具调用有 Name 但还没有启动，在这里启动它
-		// 这处理了 ID/Name 在流的最后才到达的情况
-		if !toolData.Started && toolData.Name != "" {
-			// 如果没有 ID，生成一个
-			if toolData.ID == "" {
-				toolData.ID = fmt.Sprintf("toolu_%d_%d", time.Now().UnixNano(), tcIndex)
-				if cfg.Debug {
-					fmt.Printf("[调试] 为工具 %s 生成 ID: %s\n", toolData.Name, toolData.ID)
-				}
-			}
-
-			// 检查是否已处理（防止双重处理）
-			if processedToolIDs[toolData.ID] {
-				if cfg.Debug {
-					fmt.Printf("[调试] 跳过已处理的工具调用 (延迟启动): ID=%s\n", toolData.ID)
-				}
-				continue
-			}
-			// 标记此工具调用已处理
-			processedToolIDs[toolData.ID] = true
-
-			toolData.ClaudeIndex = nextIndex
-			nextIndex++
-			toolData.Started = true
-
-			writeSSEEvent(w, "content_block_start", map[string]interface{}{
-				"type":  "content_block_start",
-				"index": toolData.ClaudeIndex,
-				"content_block": map[string]interface{}{
-					"type":  "tool_use",
-					"id":    toolData.ID,
-					"name":  toolData.Name,
-					"input": map[string]interface{}{},
-				},
-			})
-			_ = w.Flush()
-
-			if cfg.Debug {
-				fmt.Printf("[调试] 延迟启动工具块: ID=%s, Name=%s, Index=%d\n", toolData.ID, toolData.Name, toolData.ClaudeIndex)
-			}
-		}
-
-		// 检查 Started 和 claude_index 是否有效
-		if toolData.Started && toolData.ClaudeIndex != -1 {
-			// 关键修复：只有在参数没有通过流式增量发送时，才在这里发送完整参数
-			// 如果 JSONSent 为 true，说明参数已经通过 input_json_delta 事件发送过了
-			if !toolData.JSONSent {
-				// 在关闭块之前发送完整的 JSON 参数
-				// 关键修复：即使 ArgsBuffer 为空，也必须发送空对象 {}
-				// 否则 Claude Code 会报告参数缺失错误
-				var sanitizedJSON []byte
-
-				// 调试：显示最终参数缓冲区
-				if cfg.Debug {
-					fmt.Printf("[调试] 工具 %s 最终参数缓冲区（未流式发送）: '%s' (长度: %d)\n", toolData.Name, toolData.ArgsBuffer, len(toolData.ArgsBuffer))
-				}
-
-				if toolData.ArgsBuffer != "" {
-					var jsonArgs map[string]interface{}
-					if err := json.Unmarshal([]byte(toolData.ArgsBuffer), &jsonArgs); err == nil {
-						// 清理工具参数（移除无效的 query 参数）
-						sanitizedArgs := converter.SanitizeToolArgs(toolData.Name, jsonArgs)
-						sanitizedJSON, _ = json.Marshal(sanitizedArgs)
-					} else {
-						// JSON 解析失败，发送空对象
-						if cfg.Debug {
-							fmt.Printf("[调试] 工具 %s 的参数 JSON 解析失败: %v, 原始: %s\n", toolData.Name, err, toolData.ArgsBuffer)
-						}
-						sanitizedJSON = []byte("{}")
-					}
-				} else {
-					// ArgsBuffer 为空，发送空对象
-					if cfg.Debug {
-						fmt.Printf("[调试] 工具 %s 的参数为空，发送空对象\n", toolData.Name)
-					}
-					sanitizedJSON = []byte("{}")
-				}
-
-				writeSSEEvent(w, "content_block_delta", map[string]interface{}{
-					"type":  "content_block_delta",
-					"index": toolData.ClaudeIndex,
-					"delta": map[string]interface{}{
-						"type":         "input_json_delta",
-						"partial_json": string(sanitizedJSON),
-					},
-				})
-				_ = w.Flush()
-			} else if cfg.Debug {
-				fmt.Printf("[调试] 工具 %s 的参数已通过流式增量发送，跳过最终发送\n", toolData.Name)
-			}
-
-			writeSSEEvent(w, "content_block_stop", map[string]interface{}{
-				"type":  "content_block_stop",
-				"index": toolData.ClaudeIndex,
-			})
-			_ = w.Flush()
-		}
-	}
-
-	// 如果思考块有内容，发送 content_block_stop
-	if thinkingBlockStarted && thinkingBlockHasContent && thinkingBlockIndex != -1 {
-		writeSSEEvent(w, "content_block_stop", map[string]interface{}{
-			"type":  "content_block_stop",
-			"index": thinkingBlockIndex,
-		})
-		_ = w.Flush()
-	}
-
-	// 调试：检查是否收到使用量数据
-	if cfg.Debug {
-		inputTokens, _ := usageData["input_tokens"].(int)
-		outputTokens, _ := usageData["output_tokens"].(int)
-		if inputTokens == 0 && outputTokens == 0 {
-			fmt.Printf("[调试] OpenRouter 流式传输：使用量数据不可用（流式 API 的预期限制）\n")
-		}
-	}
-
-	// 发送带有 stop_reason 和累积使用量数据的 message_delta
-	// 注意：我们发送实际累积的使用量以修复 Claude Code 中的 "0 tokens" 问题
-	if cfg.Debug {
-		usageDataJSON, _ := json.Marshal(usageData)
-		fmt.Printf("[调试] 发送带有使用量数据的 message_delta: %s\n", string(usageDataJSON))
-	}
-	writeSSEEvent(w, "message_delta", map[string]interface{}{
-		"type": "message_delta",
-		"delta": map[string]interface{}{
-			"stop_reason":   finalStopReason,
-			"stop_sequence": nil,
-		},
-		"usage": usageData,
-	})
-	_ = w.Flush()
-
-	// 发送 message_stop
-	writeSSEEvent(w, "message_stop", map[string]interface{}{
-		"type": "message_stop",
-	})
-	_ = w.Flush()
-
-	// 简单日志：单行摘要
-	if cfg.SimpleLog {
-		inputTokens := 0
-		outputTokens := 0
-
-		// 尝试从各种可能的格式中提取令牌数
-		if val, ok := usageData["input_tokens"].(int); ok {
-			inputTokens = val
-		} else if val, ok := usageData["input_tokens"].(float64); ok {
-			inputTokens = int(val)
-		}
-
-		if val, ok := usageData["output_tokens"].(int); ok {
-			outputTokens = val
-		} else if val, ok := usageData["output_tokens"].(float64); ok {
-			outputTokens = int(val)
-		}
-
-		// 调试：显示 usageData 中的实际内容
-		if cfg.Debug {
-			fmt.Printf("[调试] 使用量数据: %+v\n", usageData)
-		}
-
-		// 计算每秒令牌数
-		duration := time.Since(startTime).Seconds()
-		tokensPerSec := 0.0
-		if duration > 0 && outputTokens > 0 {
-			tokensPerSec = float64(outputTokens) / duration
-		}
-
-		timestamp := time.Now().Format("15:04:05")
-		fmt.Printf("[%s] [请求] %s 模型=%s 输入=%d 输出=%d 令牌/秒=%.1f\n",
-			timestamp,
-			cfg.OpenAIBaseURL,
-			providerModel,
-			inputTokens,
-			outputTokens,
-			tokensPerSec)
-	}
+	// 完成所有块并发送最终事件
+	processor.FinalizeBlocks()
 
 	// 检查扫描器错误
 	if err := scanner.Err(); err != nil {

@@ -68,6 +68,17 @@ func main() {
 		fmt.Println("📊 简单日志模式已启用 - 每个请求一行摘要")
 	}
 
+	// 验证配置
+	if validationErr, warnings := cfg.ValidateWithWarnings(); validationErr != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", validationErr)
+		os.Exit(1)
+	} else {
+		// 显示警告信息
+		for _, w := range warnings {
+			fmt.Printf("⚠️  警告: %s\n", w)
+		}
+	}
+
 	// 检查是否已在运行
 	if daemon.IsRunning() {
 		fmt.Println("代理已在运行中")

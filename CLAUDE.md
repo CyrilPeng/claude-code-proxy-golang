@@ -203,25 +203,6 @@ func isMaxTokensParameterError(errorMessage string) bool {
 - 包含 `localhost` 或 `127.0.0.1` → ProviderOllama
 - 否则 → ProviderUnknown
 
-## ���试策略
-
-测试套件有两个主要类别：
-
-**提供商测试**（`internal/converter/provider_test.go`）：
-- 验证特定于提供商的请求参数是否正确
-- 确保 OpenRouter 获得 `reasoning: {enabled: true}` 而非 `reasoning_effort`
-- 确保 OpenAI Direct 获得 `reasoning_effort` 而非 `reasoning` 对象
-- 确保 Ollama 在存在工具时获得 `tool_choice: "required"`
-- 测试提供商隔离（无参数交叉污染）
-
-**转换测试**（`internal/converter/converter_test.go`）：
-- 测试 Claude → OpenAI 消息转换
-- 测试工具调用格式转换
-- 测试从 reasoning_details 提取思维块
-- 测试流式块聚合
-
-添加新提供商支持时，按照现有模式在 `provider_test.go` 中创建测试。
-
 ## 手动测试
 
 使用 Claude Code CLI 手动测试代理：

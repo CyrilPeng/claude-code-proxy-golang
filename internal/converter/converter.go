@@ -5,12 +5,13 @@
 package converter
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/CyrilPeng/claude-code-proxy-golang/internal/config"
+	"github.com/CyrilPeng/claude-code-proxy-golang/pkg/constants"
+	"github.com/CyrilPeng/claude-code-proxy-golang/pkg/json"
 	"github.com/CyrilPeng/claude-code-proxy-golang/pkg/models"
 )
 
@@ -239,7 +240,7 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 			// 第一遍：检查是否为工具结果消息
 			for _, block := range content {
 				if blockMap, ok := block.(map[string]interface{}); ok {
-					if blockMap["type"] == "tool_result" {
+					if blockMap["type"] == constants.ContentTypeToolResult {
 						hasToolResult = true
 						break
 					}
@@ -258,7 +259,7 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 							textParts = append(textParts, text)
 						}
 
-					case "tool_use":
+					case constants.ContentTypeToolUse:
 						// 将 tool_use 转换为 OpenAI 的 tool_calls 格式
 						toolUseID, _ := blockMap["id"].(string)
 						toolName, _ := blockMap["name"].(string)
@@ -280,7 +281,7 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 						toolCall.Function.Arguments = inputJSON
 						toolCalls = append(toolCalls, toolCall)
 
-					case "tool_result":
+					case constants.ContentTypeToolResult:
 						// 将 tool_result 转换为 OpenAI 的 tool 消息格式
 						toolUseID, _ := blockMap["tool_use_id"].(string)
 						toolContent := ""
@@ -458,7 +459,7 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 								Text: text,
 							})
 						}
-					case "tool_use":
+					case constants.ContentTypeToolUse:
 						// Claude 原生 tool_use 块
 						toolID, _ := blockMap["id"].(string)
 						toolName, _ := blockMap["name"].(string)
@@ -473,7 +474,7 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 						processedToolIDs[toolID] = true
 
 						contentBlocks = append(contentBlocks, models.ContentBlock{
-							Type:  "tool_use",
+							Type:  constants.ContentTypeToolUse,
 							ID:    toolID,
 							Name:  toolName,
 							Input: sanitizeToolInputFromInterface(toolName, toolInput),
@@ -526,16 +527,16 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 // convertFinishReason 将 OpenAI 的完成原因映射到 Claude 格式
 func convertFinishReason(openaiReason string) string {
 	switch openaiReason {
-	case "stop":
-		return "end_turn"
-	case "length":
-		return "max_tokens"
-	case "tool_calls":
-		return "tool_use"
-	case "content_filter":
-		return "end_turn" // Claude 没有完全对应的值
+	case constants.FinishReasonStop:
+		return constants.StopReasonEndTurn
+	case constants.FinishReasonLength:
+		return constants.StopReasonMaxTokens
+	case constants.FinishReasonToolCalls:
+		return constants.StopReasonToolUse
+	case constants.FinishReasonContentFilter:
+		return constants.StopReasonEndTurn // Claude 没有完全对应的值
 	default:
-		return "end_turn"
+		return constants.StopReasonEndTurn
 	}
 }
 

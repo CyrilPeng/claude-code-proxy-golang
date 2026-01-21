@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -230,4 +231,146 @@ func (c *Config) ShouldUseMaxCompletionTokens(modelName string) bool {
 		fmt.Printf("[调试] 缓存未命中: %s → 将自动检测（尝试 max_completion_tokens）\n", modelName)
 	}
 	return true
+}
+
+// ValidationError 表示配置验证错误
+type ValidationError struct {
+	Field   string // 出错的字段名
+	Message string // 错误描述
+}
+
+// Error 实现 error 接口
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("配置验证错误 [%s]: %s", e.Field, e.Message)
+}
+
+// ValidationErrors 表示多个验证错误
+type ValidationErrors []ValidationError
+
+// Error 实现 error 接口
+func (e ValidationErrors) Error() string {
+	if len(e) == 0 {
+		return ""
+	}
+	if len(e) == 1 {
+		return e[0].Error()
+	}
+	var msgs []string
+	for _, err := range e {
+		msgs = append(msgs, err.Error())
+	}
+	return fmt.Sprintf("配置验证失败，共 %d 个错误:\n  - %s", len(e), strings.Join(msgs, "\n  - "))
+}
+
+// Validate 验证配置的有效性
+// 返回 nil 表示配置有效，否则返回 ValidationErrors
+func (c *Config) Validate() error {
+	var errs ValidationErrors
+
+	// 验证 OpenAI Base URL
+	if c.OpenAIBaseURL == "" {
+		errs = append(errs, ValidationError{
+			Field:   "OPENAI_BASE_URL",
+			Message: "不能为空",
+		})
+	} else {
+		// 验证 URL 格式
+		parsedURL, err := url.Parse(c.OpenAIBaseURL)
+		if err != nil {
+			errs = append(errs, ValidationError{
+				Field:   "OPENAI_BASE_URL",
+				Message: fmt.Sprintf("URL 格式无效: %v", err),
+			})
+		} else {
+			// 验证 scheme
+			if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+				errs = append(errs, ValidationError{
+					Field:   "OPENAI_BASE_URL",
+					Message: fmt.Sprintf("URL scheme 必须是 http 或 https，当前为: %s", parsedURL.Scheme),
+				})
+			}
+			// 验证 host
+			if parsedURL.Host == "" {
+				errs = append(errs, ValidationError{
+					Field:   "OPENAI_BASE_URL",
+					Message: "URL 缺少主机名",
+				})
+			}
+		}
+	}
+
+	// 验证 API Key（非本地环境必需）
+	if c.OpenAIAPIKey == "" {
+		if !c.IsLocalhost() {
+			errs = append(errs, ValidationError{
+				Field:   "OPENAI_API_KEY",
+				Message: "非本地环境必须设置 API 密钥",
+			})
+		}
+	}
+
+	// 验证端口号
+	if c.Port != "" {
+		var port int
+		if _, err := fmt.Sscanf(c.Port, "%d", &port); err != nil {
+			errs = append(errs, ValidationError{
+				Field:   "PORT",
+				Message: fmt.Sprintf("端口号格式无效: %s", c.Port),
+			})
+		} else if port < 1 || port > 65535 {
+			errs = append(errs, ValidationError{
+				Field:   "PORT",
+				Message: fmt.Sprintf("端口号必须在 1-65535 之间，当前为: %d", port),
+			})
+		}
+	}
+
+	// 验证 OpenRouter 特定配置
+	if c.DetectProvider() == ProviderOpenRouter {
+		// OpenRouter App URL 应该是有效的 URL（如果设置了的话）
+		if c.OpenRouterAppURL != "" {
+			if _, err := url.Parse(c.OpenRouterAppURL); err != nil {
+				errs = append(errs, ValidationError{
+					Field:   "OPENROUTER_APP_URL",
+					Message: fmt.Sprintf("URL 格式无效: %v", err),
+				})
+			}
+		}
+	}
+
+	// 验证模型配置（警告级别，不阻止启动）
+	// 这里只做格式检查，不验证模型是否存在
+
+	if len(errs) > 0 {
+		return errs
+	}
+	return nil
+}
+
+// MustValidate 验证配置，如果无效则 panic
+// 用于程序启动时的配置检查
+func (c *Config) MustValidate() {
+	if err := c.Validate(); err != nil {
+		panic(fmt.Sprintf("配置验证失败: %v", err))
+	}
+}
+
+// ValidateWithWarnings 验证配置并返回警告信息
+// 返回 (errors, warnings)
+func (c *Config) ValidateWithWarnings() (error, []string) {
+	err := c.Validate()
+	var warnings []string
+
+	// 添加警告（不阻止启动但建议修复的问题）
+	if c.OpenRouterAppName == "" && c.DetectProvider() == ProviderOpenRouter {
+		warnings = append(warnings, "建议设置 OPENROUTER_APP_NAME 以获得更好的速率限制")
+	}
+	if c.OpenRouterAppURL == "" && c.DetectProvider() == ProviderOpenRouter {
+		warnings = append(warnings, "建议设置 OPENROUTER_APP_URL 以获得更好的速率限制")
+	}
+	if c.AnthropicAPIKey == "" {
+		warnings = append(warnings, "未设置 ANTHROPIC_API_KEY，将不验证入站请求的 API 密钥")
+	}
+
+	return err, warnings
 }

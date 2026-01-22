@@ -131,7 +131,7 @@ func (p *StreamProcessor) HandleThinkingDelta(delta map[string]interface{}) {
 		if reasoningDetails, ok := reasoningDetailsRaw.([]interface{}); ok && len(reasoningDetails) > 0 {
 			for _, detailRaw := range reasoningDetails {
 				if detail, ok := detailRaw.(map[string]interface{}); ok {
-					thinkingText := p.extractReasoningText(detail)
+					thinkingText := converter.ExtractReasoningText(detail)
 					if thinkingText != "" {
 						p.sendThinkingContent(thinkingText)
 					}
@@ -144,26 +144,6 @@ func (p *StreamProcessor) HandleThinkingDelta(delta map[string]interface{}) {
 	if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
 		p.sendThinkingContent(reasoning)
 	}
-}
-
-// extractReasoningText 从 reasoning_details 项中提取文本
-func (p *StreamProcessor) extractReasoningText(detail map[string]interface{}) string {
-	detailType, _ := detail["type"].(string)
-
-	switch detailType {
-	case constants.ReasoningTypeText:
-		if text, ok := detail["text"].(string); ok {
-			return text
-		}
-	case constants.ReasoningTypeSummary:
-		if summary, ok := detail["summary"].(string); ok {
-			return summary
-		}
-	case constants.ReasoningTypeEncrypted:
-		// 跳过加密/编辑的推理
-		return ""
-	}
-	return ""
 }
 
 // sendThinkingContent 发送思考块内容
@@ -267,7 +247,7 @@ func (p *StreamProcessor) handleToolUseFromContentArray(blockMap map[string]inte
 
 	// 如果没有 ID，生成一个
 	if toolID == "" {
-		toolID = fmt.Sprintf("toolu_%d", time.Now().UnixNano())
+		toolID = converter.GenerateToolID()
 	}
 
 	// 检查是否已经处理过此工具调用
@@ -285,7 +265,6 @@ func (p *StreamProcessor) handleToolUseFromContentArray(blockMap map[string]inte
 		ID:          toolID,
 		Name:        toolName,
 		ArgsBuffer:  "",
-		JSONSent:    false,
 		ClaudeIndex: p.state.NextIndex,
 		Started:     true,
 	}
@@ -383,7 +362,6 @@ func (p *StreamProcessor) HandleToolCallsDelta(toolCallsRaw interface{}) {
 				ID:          "",
 				Name:        "",
 				ArgsBuffer:  "",
-				JSONSent:    false,
 				ClaudeIndex: 0,
 				Started:     false,
 			}
@@ -422,7 +400,7 @@ func (p *StreamProcessor) processToolCallFunction(tcIndex int, toolCall *ToolCal
 	// 当有函数名称时启动内容块
 	if toolCall.Name != "" && !toolCall.Started {
 		if toolCall.ID == "" {
-			toolCall.ID = fmt.Sprintf("toolu_%d_%d", time.Now().UnixNano(), tcIndex)
+			toolCall.ID = converter.GenerateToolID(tcIndex)
 			if p.cfg.Debug {
 				fmt.Printf("[调试] 为工具 %s 生成 ID: %s\n", toolCall.Name, toolCall.ID)
 			}
@@ -453,25 +431,17 @@ func (p *StreamProcessor) processToolCallFunction(tcIndex int, toolCall *ToolCal
 		})
 		_ = p.writer.Flush()
 
-		// 发送在工具块启动前累积的参数
-		if toolCall.ArgsBuffer != "" {
-			p.sendToolArgsChunk(toolCall, toolCall.ArgsBuffer)
-			if p.cfg.Debug {
-				fmt.Printf("[调试] 工具 %s 发送启动前累积的参数: '%s'\n", toolCall.Name, toolCall.ArgsBuffer)
-			}
+		// 注意：不再在这里发送累积的参数
+		// 参数将在 finalizeToolCall 中统一清理和发送
+		// 这样可以确保 SanitizeToolArgs 能够处理完整的参数
+		if p.cfg.Debug && toolCall.ArgsBuffer != "" {
+			fmt.Printf("[调试] 工具 %s 有启动前累积的参数: '%s' (将在完成时发送)\n", toolCall.Name, toolCall.ArgsBuffer)
 		}
 	}
 
-	// 处理函数参数
-	argsChunk := p.extractToolArgs(toolCall, functionData)
-
-	// 在流式传输过程中立即发送 input_json_delta 事件
-	if toolCall.Started && argsChunk != "" {
-		p.sendToolArgsChunk(toolCall, argsChunk)
-		if p.cfg.Debug {
-			fmt.Printf("[调试] 工具 %s 发送参数增量: '%s'\n", toolCall.Name, argsChunk)
-		}
-	}
+	// 处理函数参数 - 只累积，不发送
+	// 参数将在 finalizeToolCall 中统一清理和发送
+	_ = p.extractToolArgs(toolCall, functionData)
 }
 
 // extractToolArgs 提取工具参数
@@ -503,20 +473,6 @@ func (p *StreamProcessor) extractToolArgs(toolCall *ToolCallState, functionData 
 	}
 
 	return argsChunk
-}
-
-// sendToolArgsChunk 发送工具参数增量
-func (p *StreamProcessor) sendToolArgsChunk(toolCall *ToolCallState, argsChunk string) {
-	writeSSEEvent(p.writer, constants.EventContentBlockDelta, map[string]interface{}{
-		"type":  constants.EventContentBlockDelta,
-		"index": toolCall.ClaudeIndex,
-		"delta": map[string]interface{}{
-			"type":         constants.DeltaTypeInputJSONDelta,
-			"partial_json": argsChunk,
-		},
-	})
-	_ = p.writer.Flush()
-	toolCall.JSONSent = true
 }
 
 // HandleUsageData 处理使用量数据
@@ -631,7 +587,7 @@ func (p *StreamProcessor) finalizeToolCall(tcIndex int, toolData *ToolCallState)
 	// 如果工具调用有 Name 但还没有启动，在这里启动它
 	if !toolData.Started && toolData.Name != "" {
 		if toolData.ID == "" {
-			toolData.ID = fmt.Sprintf("toolu_%d_%d", time.Now().UnixNano(), tcIndex)
+			toolData.ID = converter.GenerateToolID(tcIndex)
 			if p.cfg.Debug {
 				fmt.Printf("[调试] 为工具 %s 生成 ID: %s\n", toolData.Name, toolData.ID)
 			}
@@ -668,12 +624,9 @@ func (p *StreamProcessor) finalizeToolCall(tcIndex int, toolData *ToolCallState)
 
 	// 检查 Started 和 claude_index 是否有效
 	if toolData.Started && toolData.ClaudeIndex != -1 {
-		// 只有在参数没有通过流式增量发送时，才在这里发送完整参数
-		if !toolData.JSONSent {
-			p.sendFinalToolArgs(toolData)
-		} else if p.cfg.Debug {
-			fmt.Printf("[调试] 工具 %s 的参数已通过流式增量发送，跳过最终发送\n", toolData.Name)
-		}
+		// 始终在完成时发送清理后的参数
+		// 这确保了 SanitizeToolArgs 能够处理完整的参数并修复错误的 query 参数
+		p.sendFinalToolArgs(toolData)
 
 		writeSSEEvent(p.writer, constants.EventContentBlockStop, map[string]interface{}{
 			"type":  constants.EventContentBlockStop,
@@ -683,10 +636,10 @@ func (p *StreamProcessor) finalizeToolCall(tcIndex int, toolData *ToolCallState)
 	}
 }
 
-// sendFinalToolArgs 发送工具的最终参数
+// sendFinalToolArgs 发送工具的最终参数（经过清理）
 func (p *StreamProcessor) sendFinalToolArgs(toolData *ToolCallState) {
 	if p.cfg.Debug {
-		fmt.Printf("[调试] 工具 %s 最终参数缓冲区（未流式发送）: '%s' (长度: %d)\n", toolData.Name, toolData.ArgsBuffer, len(toolData.ArgsBuffer))
+		fmt.Printf("[调试] 工具 %s 最终参数缓冲区: '%s' (长度: %d)\n", toolData.Name, toolData.ArgsBuffer, len(toolData.ArgsBuffer))
 	}
 
 	var sanitizedJSON []byte
@@ -696,6 +649,9 @@ func (p *StreamProcessor) sendFinalToolArgs(toolData *ToolCallState) {
 		if err := json.Unmarshal([]byte(toolData.ArgsBuffer), &jsonArgs); err == nil {
 			sanitizedArgs := converter.SanitizeToolArgs(toolData.Name, jsonArgs)
 			sanitizedJSON, _ = json.Marshal(sanitizedArgs)
+			if p.cfg.Debug && string(sanitizedJSON) != toolData.ArgsBuffer {
+				fmt.Printf("[调试] 工具 %s 参数已清理: 原始='%s' -> 清理后='%s'\n", toolData.Name, toolData.ArgsBuffer, string(sanitizedJSON))
+			}
 		} else {
 			if p.cfg.Debug {
 				fmt.Printf("[调试] 工具 %s 的参数 JSON 解析失败: %v, 原始: %s\n", toolData.Name, err, toolData.ArgsBuffer)

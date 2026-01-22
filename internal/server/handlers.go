@@ -292,7 +292,6 @@ type ToolCallState struct {
 	ID          string // 来自 OpenAI 的工具调用 ID
 	Name        string // 函数名称
 	ArgsBuffer  string // 累积的 JSON 参数
-	JSONSent    bool   // 是否已发送 JSON delta 的标志
 	ClaudeIndex int    // Claude 的内容块索引
 	Started     bool   // 是否已发送 content_block_start 的标志
 }

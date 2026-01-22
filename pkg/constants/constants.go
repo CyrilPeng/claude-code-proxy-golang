@@ -146,6 +146,8 @@ const (
 const (
 	// ToolTypeFunction 函数类型工具
 	ToolTypeFunction = "function"
+	// ToolIDPrefix 工具调用 ID 前缀
+	ToolIDPrefix = "toolu_"
 )
 
 // 消息类型

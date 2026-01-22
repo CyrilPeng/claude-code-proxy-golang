@@ -26,6 +26,15 @@ const (
 	DefaultHaikuModel  = "google/gemini-2.5-pro"
 )
 
+// GenerateToolID 生成唯一的工具调用 ID
+// 可选的 index 参数用于在同一时间戳内区分多个工具调用
+func GenerateToolID(index ...int) string {
+	if len(index) > 0 {
+		return fmt.Sprintf("%s%d_%d", constants.ToolIDPrefix, time.Now().UnixNano(), index[0])
+	}
+	return fmt.Sprintf("%s%d", constants.ToolIDPrefix, time.Now().UnixNano())
+}
+
 // extractSystemText 从 Claude 的灵活系统参数中提取系统文本。
 // Claude 支持字符串格式 ("system": "text") 和包含内容块的数组格式。
 // 此函数将两种格式标准化为单个字符串，以兼容 OpenAI。
@@ -57,23 +66,24 @@ func extractSystemText(system interface{}) string {
 	return ""
 }
 
-// extractReasoningText 从 OpenRouter reasoning_details 中提取文本
+// ExtractReasoningText 从 OpenRouter reasoning_details 中提取文本
 // 处理不同的推理详情类型：reasoning.text、reasoning.summary、reasoning.encrypted
-func extractReasoningText(detail map[string]interface{}) string {
+// 导出此函数以便在 stream_processor.go 中使用
+func ExtractReasoningText(detail map[string]interface{}) string {
 	detailType, _ := detail["type"].(string)
 
 	switch detailType {
-	case "reasoning.text":
+	case constants.ReasoningTypeText:
 		// 提取文本字段
 		if text, ok := detail["text"].(string); ok {
 			return text
 		}
-	case "reasoning.summary":
+	case constants.ReasoningTypeSummary:
 		// 提取摘要字段
 		if summary, ok := detail["summary"].(string); ok {
 			return summary
 		}
-	case "reasoning.encrypted":
+	case constants.ReasoningTypeEncrypted:
 		// 跳过加密的推理内容 - 这是 base64 编码的加密数据，不应显示
 		// 像 Grok 这样的模型会在 reasoning.summary 旁边发送这个
 		return ""
@@ -265,12 +275,21 @@ func convertMessages(claudeMessages []models.ClaudeMessage, system string) []mod
 						toolName, _ := blockMap["name"].(string)
 						toolInput := blockMap["input"]
 
+						// 如果 ID 为空，生成一个
+						if toolUseID == "" {
+							toolUseID = GenerateToolID()
+						}
+
 						// 将 input 序列化为 JSON 字符串
 						var inputJSON string
 						if toolInput != nil {
 							if inputBytes, err := json.Marshal(toolInput); err == nil {
 								inputJSON = string(inputBytes)
+							} else {
+								inputJSON = "{}"
 							}
+						} else {
+							inputJSON = "{}"
 						}
 
 						toolCall := models.OpenAIToolCall{
@@ -407,7 +426,7 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 		emptySignature := "" // 用于创建空字符串指针
 		for _, reasoningDetail := range choice.Message.ReasoningDetails {
 			if detailMap, ok := reasoningDetail.(map[string]interface{}); ok {
-				thinkingText := extractReasoningText(detailMap)
+				thinkingText := ExtractReasoningText(detailMap)
 				if thinkingText != "" {
 					contentBlocks = append(contentBlocks, models.ContentBlock{
 						Type:      "thinking",
@@ -467,7 +486,7 @@ func ConvertResponse(openaiResp *models.OpenAIResponse, requestedModel string) (
 
 						// 如果没有 ID，生成一个
 						if toolID == "" {
-							toolID = fmt.Sprintf("toolu_%d", time.Now().UnixNano())
+							toolID = GenerateToolID()
 						}
 
 						// 标记此工具调用已处理
@@ -579,16 +598,34 @@ func SanitizeToolArgs(toolName string, input map[string]interface{}) map[string]
 
 	// 如果存在 query 参数则提取并移除（不区分大小写）
 	var queryContent string
+	var queryMap map[string]interface{}
 	for key, val := range input {
 		if strings.ToLower(key) == "query" {
-			if str, ok := val.(string); ok {
-				queryContent = str
+			switch v := val.(type) {
+			case string:
+				queryContent = v
+			case map[string]interface{}:
+				// query 值是对象，直接合并到 input 中
+				queryMap = v
 			}
 			delete(input, key)
 		}
 	}
 
-	// 如果没有找到 query，直接返回原始输入
+	// 如果 query 是对象，直接合并其内容
+	if queryMap != nil {
+		for k, v := range queryMap {
+			if _, exists := input[k]; !exists {
+				input[k] = v
+			}
+		}
+		// 如果合并后有所有必需参数，则返回
+		if hasRequiredParams(toolNameLower, input) {
+			return input
+		}
+	}
+
+	// 如果没有找到 query 字符串，直接返回原始输入
 	if queryContent == "" {
 		return input
 	}
@@ -675,6 +712,19 @@ func SanitizeToolArgs(toolName string, input map[string]interface{}) map[string]
 			input["prompt"] = queryContent
 		}
 
+	// TodoWrite 工具：需要 todos 数组
+	// 尝试将 query 解析为 JSON 数组
+	case strings.Contains(toolNameLower, "todo"):
+		if _, ok := input["todos"]; !ok {
+			// 尝试将 queryContent 解析为 JSON 数组
+			if strings.HasPrefix(strings.TrimSpace(queryContent), "[") {
+				var todosArray []interface{}
+				if err := json.Unmarshal([]byte(queryContent), &todosArray); err == nil {
+					input["todos"] = todosArray
+				}
+			}
+		}
+
 	// WebFetch/WebSearch：根据情况使用 url 或 query
 	case strings.Contains(toolNameLower, "webfetch") || strings.Contains(toolNameLower, "fetch"):
 		if _, ok := input["url"]; !ok {
@@ -683,6 +733,30 @@ func SanitizeToolArgs(toolName string, input map[string]interface{}) map[string]
 	case strings.Contains(toolNameLower, "websearch") || strings.Contains(toolNameLower, "search"):
 		// WebSearch 实际使用 "query" - 但我们已经移除了它，所以恢复它
 		input["query"] = queryContent
+
+	// Skill 工具：需要 skill 参数
+	case strings.Contains(toolNameLower, "skill"):
+		if _, ok := input["skill"]; !ok {
+			input["skill"] = queryContent
+		}
+
+	// AskUserQuestion 工具：需要 questions 参数
+	case strings.Contains(toolNameLower, "askuserquestion") || strings.Contains(toolNameLower, "ask"):
+		if _, ok := input["questions"]; !ok {
+			// 尝试将 queryContent 解析为 JSON 数组
+			if strings.HasPrefix(strings.TrimSpace(queryContent), "[") {
+				var questionsArray []interface{}
+				if err := json.Unmarshal([]byte(queryContent), &questionsArray); err == nil {
+					input["questions"] = questionsArray
+				}
+			}
+		}
+
+	// NotebookEdit 工具：需要 notebook_path 和 new_source
+	case strings.Contains(toolNameLower, "notebook"):
+		if _, ok := input["notebook_path"]; !ok {
+			input["notebook_path"] = queryContent
+		}
 	}
 
 	return input
@@ -712,6 +786,15 @@ func hasRequiredParams(toolNameLower string, input map[string]interface{}) bool 
 		_, hasFilePath := input["file_path"]
 		_, hasContent := input["content"]
 		return hasFilePath && hasContent
+	case strings.Contains(toolNameLower, "todo"):
+		_, hasTodos := input["todos"]
+		return hasTodos
+	case strings.Contains(toolNameLower, "skill"):
+		_, hasSkill := input["skill"]
+		return hasSkill
+	case strings.Contains(toolNameLower, "notebook"):
+		_, hasPath := input["notebook_path"]
+		return hasPath
 	default:
 		return true
 	}

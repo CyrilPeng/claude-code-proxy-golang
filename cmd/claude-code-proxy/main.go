@@ -75,7 +75,7 @@ func main() {
 	} else {
 		// 显示警告信息
 		for _, w := range warnings {
-			fmt.Printf("⚠️  警告: %s\n", w)
+			fmt.Printf("⚠️ 警告: %s\n", w)
 		}
 	}
 
